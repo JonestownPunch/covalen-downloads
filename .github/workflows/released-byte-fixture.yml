@@ -1,0 +1,87 @@
+name: released-byte-fixture-smoke
+
+# One manual installed check of the public release bytes. This uses only
+# candidate-carried fixture identities; it cannot close R4.6 acceptance.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  installed-fixture:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
+      - name: Download and authenticate the exact public release bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          date -u '+started_at=%Y-%m-%dT%H:%M:%SZ'
+          uname -m
+          docker version
+          release=https://github.com/JonestownPunch/covalen-downloads/releases/download/v0.1.1
+          delivery="$RUNNER_TEMP/covalen-release"
+          verified="$RUNNER_TEMP/verified-candidate"
+          mkdir -m 700 "$delivery" "$verified"
+          for item in candidate.tar candidate.tar.cosign.bundle predecessor.tar \
+            predecessor.tar.cosign.bundle SHA256SUMS SHA256SUMS.cosign.bundle; do
+            curl --fail --location --silent --show-error \
+              --proto '=https' --tlsv1.2 \
+              --output "$delivery/$item" "$release/$item"
+          done
+          test "$(sha256sum "$delivery/SHA256SUMS" | cut -d ' ' -f 1)" = \
+            1d7dfbd3a2f3e019fca82055d93abd78b501f466f95a0dc490b1ec445ea5da43
+          identity='https://github.com/JonestownPunch/covalen/.github/workflows/gcs-release-candidate.yml@refs/tags/v0.1.1'
+          issuer='https://token.actions.githubusercontent.com'
+          for item in candidate.tar predecessor.tar SHA256SUMS; do
+            cosign verify-blob --offline \
+              --bundle "$delivery/$item.cosign.bundle" \
+              --certificate-identity "$identity" \
+              --certificate-oidc-issuer "$issuer" \
+              "$delivery/$item"
+          done
+          cd "$delivery"
+          sha256sum -c SHA256SUMS
+          test "$(sha256sum candidate.tar | cut -d ' ' -f 1)" = \
+            1605067fcad4d680d2e297888dda83ed1d6b6ec88a7e228a328b6b0c562a3afc
+          test "$(sha256sum predecessor.tar | cut -d ' ' -f 1)" = \
+            90cf51c50ad2e6295dabaa15ef8ee843b428360cf62b7b24c6920f8802cbabcd
+          tar --no-same-owner --no-same-permissions -xf candidate.tar -C "$verified"
+          test "$(sha256sum "$verified/run-acceptance.sh" | cut -d ' ' -f 1)" = \
+            "$(awk '$2 == "run-acceptance.sh" {print $1}' "$verified/checksums.txt")"
+          echo 'fixture_only=true; no external demo-tenant authority or operator approval'
+      - name: Exercise the signed artifact-only fixture entrypoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          delivery="$RUNNER_TEMP/covalen-release"
+          verified="$RUNNER_TEMP/verified-candidate"
+          evidence="$RUNNER_TEMP/covalen-fixture-evidence"
+          mkdir -m 700 "$evidence"
+          export COVALEN_R4_EXPECTED_TARGET_SHA256=1605067fcad4d680d2e297888dda83ed1d6b6ec88a7e228a328b6b0c562a3afc
+          export COVALEN_R44_UPGRADE_TAR="$delivery/candidate.tar"
+          export COVALEN_R44_UPGRADE_BUNDLE="$delivery/candidate.tar.cosign.bundle"
+          export COVALEN_R44_UPGRADE_SOURCE_SHA=82e24a2e90b49584206356abb3aaaa786e21e1a1
+          export COVALEN_R44_EVIDENCE_DIR="$evidence"
+          "$verified/run-acceptance.sh" \
+            "$delivery/predecessor.tar" \
+            "$delivery/predecessor.tar.cosign.bundle" \
+            'https://github.com/JonestownPunch/covalen/.github/workflows/gcs-release-candidate.yml@refs/tags/v0.1.1' \
+            'https://token.actions.githubusercontent.com' \
+            49dd579cec1205a3dfa818c1bc879947e0b78e8b
+          echo 'fixture_only=true; final R4.6 released-byte verdict remains pending'
+      - name: Retain only fixture row results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: covalen-v0.1.1-public-fixture-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/covalen-fixture-evidence/row-verdicts.json
+            ${{ runner.temp }}/covalen-fixture-evidence/result.json
+          if-no-files-found: ignore
+          retention-days: 7
